@@ -970,6 +970,11 @@ body.overlay,
 html:has(body.overlay) {
   height: auto;
   min-height: 100%;
+  /* The renderer measures content height and asks main to resize the
+     BrowserWindow, but there's a brief frame between the DOM growing and
+     the window catching up. Hide overflow so no scrollbar flashes during
+     that gap — offsetHeight is unaffected. */
+  overflow: hidden;
 }
 body.overlay {
   background: transparent;
