@@ -60,11 +60,19 @@ export function mockData(): ProdtickData {
       makeTask('Fix the <span data-color="blue">build pipeline</span>', true, 14_400_000, 10_800_000)
     ],
     archive,
+    reports: [],
     settings: {
       launchOnStartup: false,
       startMinimized: false,
       showOverlay: false,
-      darkMode: true
+      darkMode: true,
+      weeklyReport: {
+        enabled: true,
+        dayOfWeek: 1,
+        hour: 12,
+        minute: 0,
+        notify: true
+      }
     }
   }
 }

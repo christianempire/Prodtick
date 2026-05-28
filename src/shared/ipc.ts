@@ -13,6 +13,10 @@ export const IPC = {
   restoreArchived: 'pt:restoreArchived',
   setCompletedAt: 'pt:setCompletedAt',
   setSettings: 'pt:setSettings',
+  setWeeklyReportSettings: 'pt:setWeeklyReportSettings',
+  generateReportNow: 'pt:generateReportNow',
+  markReportSeen: 'pt:markReportSeen',
+  deleteReport: 'pt:deleteReport',
   showMain: 'pt:showMain',
   isPackaged: 'pt:isPackaged',
   windowMinimize: 'pt:window:minimize',
@@ -22,5 +26,6 @@ export const IPC = {
   overlayHide: 'pt:overlay:hide',
   overlayResize: 'pt:overlay:resize',
   data: 'pt:data',
-  maximized: 'pt:window:maximized'
+  maximized: 'pt:window:maximized',
+  showReport: 'pt:showReport'
 } as const

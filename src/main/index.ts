@@ -12,19 +12,23 @@ import {
   archiveOne,
   clearArchive,
   deleteArchived,
+  deleteReport,
   deleteTask,
   getData,
+  markReportSeen,
   reorderActive,
   restoreArchived,
   setCompletedAt,
   setSettings,
+  setWeeklyReportSettings,
   tickTask,
   untickTask,
   updateTask
 } from './dataStore'
 import { destroyTray, ensureTray, refreshMenu } from './tray'
+import { generateNow, startScheduler, stopScheduler } from './scheduler'
 import { IPC } from '@shared/ipc'
-import type { ProdtickData, Settings, TaskId } from '@shared/types'
+import type { ProdtickData, Settings, TaskId, WeeklyReport, WeeklyReportSettings } from '@shared/types'
 
 const LAUNCH_HIDDEN = process.argv.includes('--hidden')
 
@@ -281,6 +285,44 @@ app.whenReady().then(() => {
     broadcastData(d)
     return d
   })
+  const schedulerHooks = {
+    onNewReport: (r: WeeklyReport) => {
+      broadcastData(getData())
+      // Tell the renderer to pop the modal open. The renderer ignores it if
+      // the report has been marked seen by the time the message arrives.
+      broadcast(IPC.showReport, r.id)
+    },
+    onToastClick: (id: string) => {
+      createMainWindow()
+      mainWindow?.show()
+      mainWindow?.focus()
+      broadcast(IPC.showReport, id)
+    },
+    iconPath: () => appIconPath()
+  }
+  startScheduler(schedulerHooks)
+
+  ipcMain.handle(IPC.setWeeklyReportSettings, (_e, patch: Partial<WeeklyReportSettings>) => {
+    const d = setWeeklyReportSettings(patch)
+    broadcastData(d)
+    if (d.settings.weeklyReport.enabled) startScheduler(schedulerHooks)
+    else stopScheduler()
+    return d
+  })
+  ipcMain.handle(IPC.generateReportNow, () => {
+    generateNow(schedulerHooks)
+    return getData()
+  })
+  ipcMain.handle(IPC.markReportSeen, (_e, id: string) => {
+    const d = markReportSeen(id)
+    broadcastData(d)
+    return d
+  })
+  ipcMain.handle(IPC.deleteReport, (_e, id: string) => {
+    const d = deleteReport(id)
+    broadcastData(d)
+    return d
+  })
   ipcMain.handle(IPC.setSettings, (_e, patch: Partial<Settings>) => {
     const launchChanged =
       typeof patch.launchOnStartup === 'boolean' && patch.launchOnStartup !== settings().launchOnStartup
@@ -333,6 +375,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   ;(app as { isQuiting?: boolean }).isQuiting = true
+  stopScheduler()
   destroyTray()
 })
 

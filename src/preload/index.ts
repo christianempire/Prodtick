@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { ProdtickApi, ProdtickData, TaskId, Settings } from '@shared/types'
+import type { ProdtickApi, ProdtickData, TaskId, Settings, WeeklyReportSettings } from '@shared/types'
 
 const api: ProdtickApi = {
   getData: () => ipcRenderer.invoke(IPC.getData),
@@ -17,6 +17,11 @@ const api: ProdtickApi = {
   restoreArchived: id => ipcRenderer.invoke(IPC.restoreArchived, id),
   setCompletedAt: (id, ts) => ipcRenderer.invoke(IPC.setCompletedAt, id, ts),
   setSettings: (patch: Partial<Settings>) => ipcRenderer.invoke(IPC.setSettings, patch),
+  setWeeklyReportSettings: (patch: Partial<WeeklyReportSettings>) =>
+    ipcRenderer.invoke(IPC.setWeeklyReportSettings, patch),
+  generateReportNow: () => ipcRenderer.invoke(IPC.generateReportNow),
+  markReportSeen: (id: string) => ipcRenderer.invoke(IPC.markReportSeen, id),
+  deleteReport: (id: string) => ipcRenderer.invoke(IPC.deleteReport, id),
   showMainWindow: () => ipcRenderer.invoke(IPC.showMain),
   isPackaged: () => ipcRenderer.invoke(IPC.isPackaged),
   windowMinimize: () => ipcRenderer.invoke(IPC.windowMinimize),
@@ -34,6 +39,11 @@ const api: ProdtickApi = {
     const handler = (_e: Electron.IpcRendererEvent, m: boolean) => cb(m)
     ipcRenderer.on(IPC.maximized, handler)
     return () => ipcRenderer.removeListener(IPC.maximized, handler)
+  },
+  onShowReport: cb => {
+    const handler = (_e: Electron.IpcRendererEvent, id: string) => cb(id)
+    ipcRenderer.on(IPC.showReport, handler)
+    return () => ipcRenderer.removeListener(IPC.showReport, handler)
   }
 }
 

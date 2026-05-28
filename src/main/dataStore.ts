@@ -1,16 +1,32 @@
 import Store from 'electron-store'
 import { randomUUID } from 'node:crypto'
-import type { ProdtickData, Settings, Task, TaskId } from '@shared/types'
+import type {
+  ProdtickData,
+  Settings,
+  Task,
+  TaskId,
+  WeeklyReport,
+  WeeklyReportSettings
+} from '@shared/types'
+
+const DEFAULT_WEEKLY_REPORT: WeeklyReportSettings = {
+  enabled: true,
+  dayOfWeek: 1, // Monday
+  hour: 12,
+  minute: 0,
+  notify: true
+}
 
 const DEFAULT_SETTINGS: Settings = {
   launchOnStartup: false,
   startMinimized: false,
   showOverlay: false,
-  darkMode: true
+  darkMode: true,
+  weeklyReport: { ...DEFAULT_WEEKLY_REPORT }
 }
 
 function makeDefault(): ProdtickData {
-  return { active: [], done: [], archive: [], settings: { ...DEFAULT_SETTINGS } }
+  return { active: [], done: [], archive: [], reports: [], settings: { ...DEFAULT_SETTINGS } }
 }
 
 const store = new Store<{ data: ProdtickData }>({ name: 'prodtick-data' })
@@ -26,7 +42,12 @@ let cache: ProdtickData = (() => {
     active: existing.active ?? [],
     done: existing.done ?? [],
     archive: existing.archive ?? [],
-    settings: { ...DEFAULT_SETTINGS, ...(existing.settings ?? {}) }
+    reports: existing.reports ?? [],
+    settings: {
+      ...DEFAULT_SETTINGS,
+      ...(existing.settings ?? {}),
+      weeklyReport: { ...DEFAULT_WEEKLY_REPORT, ...(existing.settings?.weeklyReport ?? {}) }
+    }
   }
 })()
 
@@ -167,6 +188,42 @@ export function restoreArchived(id: TaskId): ProdtickData {
 
 export function setSettings(patch: Partial<Settings>): ProdtickData {
   cache = { ...cache, settings: { ...cache.settings, ...patch } }
+  save()
+  return cache
+}
+
+export function setWeeklyReportSettings(patch: Partial<WeeklyReportSettings>): ProdtickData {
+  cache = {
+    ...cache,
+    settings: {
+      ...cache.settings,
+      weeklyReport: { ...cache.settings.weeklyReport, ...patch }
+    }
+  }
+  save()
+  return cache
+}
+
+export function addReport(report: WeeklyReport): ProdtickData {
+  // Newest first. If a report for the same window already exists, replace it
+  // (idempotent: re-running for the same week updates instead of duplicating).
+  const filtered = cache.reports.filter(r => r.weekStart !== report.weekStart)
+  cache = { ...cache, reports: [report, ...filtered] }
+  save()
+  return cache
+}
+
+export function markReportSeen(id: string): ProdtickData {
+  cache = {
+    ...cache,
+    reports: cache.reports.map(r => (r.id === id ? { ...r, seen: true } : r))
+  }
+  save()
+  return cache
+}
+
+export function deleteReport(id: string): ProdtickData {
+  cache = { ...cache, reports: cache.reports.filter(r => r.id !== id) }
   save()
   return cache
 }
