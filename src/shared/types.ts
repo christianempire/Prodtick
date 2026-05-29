@@ -85,7 +85,6 @@ export interface ProdtickApi {
   windowClose: () => Promise<void>
   windowIsMaximized: () => Promise<boolean>
   overlayHide: () => Promise<void>
-  overlayResize: (height: number) => Promise<void>
   onData: (cb: (d: ProdtickData) => void) => () => void
   onMaximized: (cb: (m: boolean) => void) => () => void
   onShowReport: (cb: (reportId: string) => void) => () => void

@@ -29,7 +29,6 @@ const api: ProdtickApi = {
   windowClose: () => ipcRenderer.invoke(IPC.windowClose),
   windowIsMaximized: () => ipcRenderer.invoke(IPC.windowIsMaximized),
   overlayHide: () => ipcRenderer.invoke(IPC.overlayHide),
-  overlayResize: height => ipcRenderer.invoke(IPC.overlayResize, height),
   onData: cb => {
     const handler = (_e: Electron.IpcRendererEvent, d: ProdtickData) => cb(d)
     ipcRenderer.on(IPC.data, handler)

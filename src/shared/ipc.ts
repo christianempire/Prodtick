@@ -24,7 +24,6 @@ export const IPC = {
   windowClose: 'pt:window:close',
   windowIsMaximized: 'pt:window:is-maximized',
   overlayHide: 'pt:overlay:hide',
-  overlayResize: 'pt:overlay:resize',
   data: 'pt:data',
   maximized: 'pt:window:maximized',
   showReport: 'pt:showReport'

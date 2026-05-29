@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTasks } from '../state/tasksStore'
 import { prodtick } from '../api'
 import TaskRow from './TaskRow'
@@ -11,7 +11,6 @@ export default function OverlayView() {
   const active = useTasks(s => s.data?.active ?? [])
   const done = useTasks(s => s.data?.done ?? [])
   const [showDone, setShowDone] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -21,29 +20,8 @@ export default function OverlayView() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // Measure the overlay's natural content height and ask main to resize the
-  // BrowserWindow so the overlay never needs to scroll.
-  useLayoutEffect(() => {
-    const el = rootRef.current
-    if (!el) return
-    let raf = 0
-    const report = () => {
-      raf = 0
-      prodtick.overlayResize(el.offsetHeight)
-    }
-    const ro = new ResizeObserver(() => {
-      if (raf) cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(report)
-    })
-    ro.observe(el)
-    return () => {
-      ro.disconnect()
-      if (raf) cancelAnimationFrame(raf)
-    }
-  }, [])
-
   return (
-    <div className="pt-overlay" ref={rootRef}>
+    <div className="pt-overlay">
       <div className="pt-overlay-head">
         <div className="pt-overlay-name">PRODTICK</div>
         <div className="pt-overlay-actions">

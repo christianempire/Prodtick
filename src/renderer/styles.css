@@ -968,12 +968,9 @@ body {
 /* =========================================================== */
 body.overlay,
 html:has(body.overlay) {
-  height: auto;
-  min-height: 100%;
-  /* The renderer measures content height and asks main to resize the
-     BrowserWindow, but there's a brief frame between the DOM growing and
-     the window catching up. Hide overflow so no scrollbar flashes during
-     that gap — offsetHeight is unaffected. */
+  height: 100%;
+  /* The overlay fills its (manually resizable) window; the list inside
+     scrolls. Hide overflow here so the rounded window border clips cleanly. */
   overflow: hidden;
 }
 body.overlay {
@@ -991,9 +988,8 @@ body.overlay .pt-drag {
 }
 
 .pt-overlay {
-  /* Height is driven by content; the main process resizes the BrowserWindow
-     to match via the overlayResize IPC, so the overlay never needs to scroll. */
-  height: auto;
+  /* Fills the (manually resizable) overlay window; the list area scrolls. */
+  height: 100%;
   display: flex;
   flex-direction: column;
   font-family: var(--font-body);
@@ -1080,7 +1076,19 @@ body.overlay .pt-drag {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-4) transparent;
 }
+.pt-overlay-list::-webkit-scrollbar { width: 8px; }
+.pt-overlay-list::-webkit-scrollbar-thumb {
+  background: var(--ink-4);
+  border-radius: 4px;
+}
+.pt-overlay-list::-webkit-scrollbar-track { background: transparent; }
 .pt-overlay-row {
   display: grid;
   grid-template-columns: 12px 14px 1fr auto;

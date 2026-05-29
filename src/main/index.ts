@@ -114,12 +114,14 @@ function createOverlayWindow() {
   const display = screen.getPrimaryDisplay().workArea
   overlayWindow = new BrowserWindow({
     width: 320,
-    height: 200, // Initial — renderer will resize to fit content via overlayResize IPC
+    height: 420,
+    minWidth: 260,
+    minHeight: 160,
     x: display.x + display.width - 344,
     y: display.y + 20,
     useContentSize: true,
     frame: false,
-    resizable: false,
+    resizable: true,
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
@@ -353,16 +355,6 @@ app.whenReady().then(() => {
     destroyOverlayWindow()
     broadcastData(d)
     refreshTray()
-  })
-  ipcMain.handle(IPC.overlayResize, (_e, height: number) => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) return
-    const display = screen.getPrimaryDisplay().workArea
-    const bounds = overlayWindow.getBounds()
-    // Bottom of screen relative to the overlay's current top — never grow off-screen.
-    const maxFromY = display.y + display.height - bounds.y - 8
-    const target = Math.min(Math.max(120, Math.ceil(height)), maxFromY)
-    if (bounds.height === target) return
-    overlayWindow.setBounds({ ...bounds, height: target })
   })
 
   if (!LAUNCH_HIDDEN && !settings().startMinimized) createMainWindow()
