@@ -696,6 +696,9 @@ body {
 }
 .pt-modal {
   width: min(420px, 90%);
+  max-height: 92%;
+  display: flex;
+  flex-direction: column;
   background: var(--ink-2);
   border: 1px solid var(--ink-4);
   border-radius: var(--r-lg);
@@ -703,6 +706,7 @@ body {
   overflow: hidden;
 }
 .pt-modal-head {
+  flex: 0 0 auto;
   padding: 20px 22px 6px;
   font-family: var(--font-display);
   font-style: italic;
@@ -710,16 +714,29 @@ body {
   color: var(--fg-0);
 }
 .pt-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 0 22px 18px;
   color: var(--fg-2);
   font-size: 13.5px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-4) transparent;
 }
+.pt-modal-body::-webkit-scrollbar { width: 8px; }
+.pt-modal-body::-webkit-scrollbar-thumb {
+  background: var(--ink-4);
+  border-radius: 4px;
+}
+.pt-modal-body::-webkit-scrollbar-track { background: transparent; }
 .pt-modal-body em {
   color: var(--amber);
   font-family: var(--font-display);
   font-style: italic;
 }
 .pt-modal-foot {
+  flex: 0 0 auto;
   padding: 14px 22px;
   display: flex;
   justify-content: flex-end;
