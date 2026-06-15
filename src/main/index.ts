@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, screen, nativeImage } from 'electron'
+import Store from 'electron-store'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -46,6 +47,34 @@ function appIcon(): Electron.NativeImage | undefined {
 
 let mainWindow: BrowserWindow | null = null
 let overlayWindow: BrowserWindow | null = null
+
+interface WindowBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+// Persisted separately from app data so it isn't broadcast to the renderer.
+const windowStore = new Store<{ overlayBounds?: WindowBounds }>({ name: 'prodtick-window-state' })
+
+const OVERLAY_MIN_WIDTH = 260
+const OVERLAY_MIN_HEIGHT = 160
+
+// A saved position is only usable if a meaningful chunk of the window still
+// lands on a currently-connected display. This guards against a monitor being
+// unplugged or rearranged between sessions (multi-monitor setups), which would
+// otherwise strand the overlay off-screen where the user can't reach it.
+function boundsAreVisible(b: WindowBounds): boolean {
+  const needX = Math.min(b.width, 120)
+  const needY = Math.min(b.height, 60)
+  return screen.getAllDisplays().some(d => {
+    const wa = d.workArea
+    const overlapX = Math.min(b.x + b.width, wa.x + wa.width) - Math.max(b.x, wa.x)
+    const overlapY = Math.min(b.y + b.height, wa.y + wa.height) - Math.max(b.y, wa.y)
+    return overlapX >= needX && overlapY >= needY
+  })
+}
 
 function settings(): Settings {
   return getData().settings
@@ -112,13 +141,15 @@ function createOverlayWindow() {
     return
   }
   const display = screen.getPrimaryDisplay().workArea
+  const saved = windowStore.get('overlayBounds')
+  const restore = saved && boundsAreVisible(saved) ? saved : null
   overlayWindow = new BrowserWindow({
-    width: 320,
-    height: 420,
-    minWidth: 260,
-    minHeight: 160,
-    x: display.x + display.width - 344,
-    y: display.y + 20,
+    width: restore?.width ?? 320,
+    height: restore?.height ?? 420,
+    minWidth: OVERLAY_MIN_WIDTH,
+    minHeight: OVERLAY_MIN_HEIGHT,
+    x: restore?.x ?? display.x + display.width - 344,
+    y: restore?.y ?? display.y + 20,
     useContentSize: true,
     frame: false,
     resizable: true,
@@ -135,6 +166,16 @@ function createOverlayWindow() {
     }
   })
   overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+
+  // Remember size/position across restarts. `moved`/`resized` fire once the
+  // user finishes dragging, so we persist the final bounds rather than every
+  // intermediate frame.
+  const persistOverlayBounds = () => {
+    if (!overlayWindow || overlayWindow.isDestroyed() || overlayWindow.isMinimized()) return
+    windowStore.set('overlayBounds', overlayWindow.getBounds())
+  }
+  overlayWindow.on('moved', persistOverlayBounds)
+  overlayWindow.on('resized', persistOverlayBounds)
   if (process.env['ELECTRON_RENDERER_URL']) {
     overlayWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + '/index.html?overlay=1')
   } else {
