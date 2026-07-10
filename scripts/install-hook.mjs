@@ -21,6 +21,34 @@ const REPO_ROOT = path.resolve(__dirname, '..')
 const HOOK_SCRIPT = path.join(REPO_ROOT, 'hooks', 'prodtick-done.js')
 const INBOX_DIR = path.join(os.homedir(), 'AppData', 'Roaming', 'Prodtick', 'inbox')
 
+// Reuse an existing ANTHROPIC_API_KEY for AI titles without duplicating the
+// secret: prefer an explicit --env-file, else auto-detect a sibling psst/.env
+// that already defines the key. The path is baked into the hook args at install.
+function fileHasKey(file, name) {
+  try {
+    return fs.readFileSync(file, 'utf8').split(/\r?\n/).some((l) => {
+      const m = l.match(/^\s*([A-Za-z0-9_]+)\s*=/)
+      return m && m[1] === name
+    })
+  } catch {
+    return false
+  }
+}
+
+function resolveEnvFile() {
+  const explicit = argValue('--env-file')
+  if (explicit) return explicit
+  const sibling = path.resolve(REPO_ROOT, '..', 'psst', '.env')
+  return fileHasKey(sibling, 'ANTHROPIC_API_KEY') ? sibling : null
+}
+
+function argValue(name) {
+  const i = process.argv.indexOf(name)
+  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : null
+}
+
+const ENV_FILE = resolveEnvFile()
+
 const CLAUDE_DIR = path.join(os.homedir(), '.claude')
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'settings.json')
 const SETTINGS_BACKUP = path.join(CLAUDE_DIR, 'settings.json.prodtick.bak')
@@ -42,7 +70,9 @@ function isOurHook(h) {
 }
 
 function buildEntry() {
-  return { type: 'command', command: 'node', args: [HOOK_SCRIPT, '--inbox', INBOX_DIR] }
+  const args = [HOOK_SCRIPT, '--inbox', INBOX_DIR]
+  if (ENV_FILE) args.push('--env-file', ENV_FILE)
+  return { type: 'command', command: 'node', args }
 }
 
 function readSettings() {
@@ -98,11 +128,9 @@ function install() {
   console.log('  script: ' + HOOK_SCRIPT)
   console.log('  inbox:  ' + INBOX_DIR)
   console.log('  claude: ' + SETTINGS_FILE)
-  console.log(
-    process.env.ANTHROPIC_API_KEY
-      ? '  summaries: ON (ANTHROPIC_API_KEY detected)'
-      : '  summaries: OFF (set ANTHROPIC_API_KEY for AI titles; falls back to raw text)'
-  )
+  if (process.env.ANTHROPIC_API_KEY) console.log('  summaries: ON (ANTHROPIC_API_KEY in environment)')
+  else if (ENV_FILE) console.log('  summaries: ON (ANTHROPIC_API_KEY from ' + ENV_FILE + ')')
+  else console.log('  summaries: OFF (no key; set ANTHROPIC_API_KEY or --env-file for AI titles; falls back to raw text)')
 }
 
 function uninstall() {

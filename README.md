@@ -104,9 +104,12 @@ other Stop hooks (e.g. a Discord notifier). To wire it up by hand instead, add t
 ] }
 ```
 
-**AI titles (optional).** With `ANTHROPIC_API_KEY` set in the hook's environment, each task gets a
-concise one-line title via `claude-haiku-4-5`; without a key it falls back to Claude's last message
-(truncated). Override the model with `PRODTICK_SUMMARY_MODEL`.
+**AI titles (optional).** Each task gets a concise one-line title via `claude-haiku-4-5` when an
+`ANTHROPIC_API_KEY` is available; without one it falls back to Claude's last message (truncated).
+The key is resolved in this order: the hook process's `ANTHROPIC_API_KEY`, then an `--env-file`
+(or `PRODTICK_ENV_FILE`) pointing at a `.env` that defines it. The installer auto-detects a sibling
+`../psst/.env` and bakes its path in, so an existing key there is reused without duplicating the
+secret into the system environment. Override the model with `PRODTICK_SUMMARY_MODEL`.
 
 **Settings.** `settings.claudeCode` controls ingestion: `enabled` (master switch) and
 `projectAllowlist` (empty = accept all projects; otherwise only the listed project folder names).

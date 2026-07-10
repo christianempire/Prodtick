@@ -25,13 +25,48 @@ const TAIL_BYTES = 512 * 1024;
 const MAX_TITLE = 2000;
 const SUMMARY_MODEL = process.env.PRODTICK_SUMMARY_MODEL || 'claude-haiku-4-5';
 
+function argValue(name) {
+  const i = process.argv.indexOf(name);
+  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : null;
+}
+
 // --- inbox dir: --inbox arg wins, then env, else default Windows userData ---
 function inboxDir() {
-  const i = process.argv.indexOf('--inbox');
-  if (i !== -1 && process.argv[i + 1]) return process.argv[i + 1];
-  if (process.env.PRODTICK_INBOX) return process.env.PRODTICK_INBOX;
   // electron-store productName = "Prodtick" -> %APPDATA%\Prodtick.
-  return path.join(os.homedir(), 'AppData', 'Roaming', 'Prodtick', 'inbox');
+  return (
+    argValue('--inbox') ||
+    process.env.PRODTICK_INBOX ||
+    path.join(os.homedir(), 'AppData', 'Roaming', 'Prodtick', 'inbox')
+  );
+}
+
+// Pull a single KEY=value out of a .env-style file (quotes stripped). Used to
+// reuse an existing ANTHROPIC_API_KEY (e.g. psst's .env) without duplicating the
+// secret into the system environment. Best-effort — returns null on any problem.
+function readEnvFileKey(file, name) {
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$/);
+      if (m && m[1] === name) {
+        let v = m[2];
+        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+          v = v.slice(1, -1);
+        }
+        return v || null;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+// The environment Claude Code runs hooks in usually won't have ANTHROPIC_API_KEY,
+// so fall back to an --env-file (baked by the installer, e.g. a sibling psst/.env).
+function resolveApiKey() {
+  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+  const envFile = argValue('--env-file') || process.env.PRODTICK_ENV_FILE;
+  return envFile ? readEnvFileKey(envFile, 'ANTHROPIC_API_KEY') : null;
 }
 
 function readStdin() {
@@ -152,7 +187,7 @@ function escapeHtml(s) {
 // falls back to the raw last message. Uses a plain Messages API call.
 function summarize(text) {
   return new Promise((resolve) => {
-    const key = process.env.ANTHROPIC_API_KEY;
+    const key = resolveApiKey();
     if (!key || !text) return resolve(null);
     const payload = JSON.stringify({
       model: SUMMARY_MODEL,
