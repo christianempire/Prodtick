@@ -14,7 +14,10 @@
     "package": "electron-vite build && electron-builder --dir",
     "build:icons": "node scripts/build-icons.mjs",
     "deploy": "node scripts/deploy.mjs",
-    "undeploy": "node scripts/undeploy.mjs"
+    "undeploy": "node scripts/undeploy.mjs",
+    "hook:install": "node scripts/install-hook.mjs",
+    "hook:uninstall": "node scripts/install-hook.mjs --uninstall",
+    "hook:status": "node scripts/install-hook.mjs --status"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",

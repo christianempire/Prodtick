@@ -1,10 +1,20 @@
 export type TaskId = string
 
+// Marks a task that was ingested from an external source (e.g. a finished
+// Claude Code session) rather than created by hand. `sessionId` is the upsert
+// key: later iterations of the same session update the same task in place.
+export interface TaskSource {
+  kind: 'claude-code'
+  sessionId: string
+  project: string
+}
+
 export interface Task {
   id: TaskId
   html: string
   createdAt: number
   completedAt: number | null
+  source?: TaskSource // present only for externally-ingested tasks
 }
 
 // 0 = Sunday … 6 = Saturday (JavaScript getDay() convention).
@@ -18,12 +28,19 @@ export interface WeeklyReportSettings {
   notify: boolean
 }
 
+// Ingestion of finished Claude Code sessions dropped into the inbox folder.
+export interface ClaudeCodeSettings {
+  enabled: boolean // master switch for inbox ingestion
+  projectAllowlist: string[] // empty = accept all projects
+}
+
 export interface Settings {
   launchOnStartup: boolean
   startMinimized: boolean
   showOverlay: boolean
   darkMode: boolean
   weeklyReport: WeeklyReportSettings
+  claudeCode: ClaudeCodeSettings
 }
 
 export interface WeeklyReportCompletion {

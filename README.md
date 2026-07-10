@@ -13,6 +13,7 @@ A local-first Windows desktop task tracker. Add tasks, tick them off, and watch 
 - **Stats** — today / last 7 / previous 7 / streak / all time, plus a 14-day bar chart
 - **Desktop overlay** — always-on-top compact window with quick-add, sortable active list, and a collapsible done section. Auto-grows to fit your tasks (no scrolling)
 - **Start with Windows** toggle, system tray icon, single-instance lock
+- **Claude Code integration** — finished coding sessions auto-log as completed tasks (see below)
 
 ## Tech stack
 
@@ -71,6 +72,44 @@ npm run undeploy -- --wipe-data  # also delete user data in %APPDATA%\Prodtick
 ```
 
 The deploy script uses a rename-then-rm trick so an in-use install directory doesn't block updates: it renames the existing install to a `.old-{timestamp}` sibling before dropping the new files into place, then best-effort cleans the stash up on the next run.
+
+## Claude Code integration
+
+When a [Claude Code](https://claude.com/claude-code) session that actually edited files finishes a
+turn, it can auto-log a **completed task** into Prodtick summarizing what was done. Later iterations
+of the same session update that same task in place rather than piling up duplicates.
+
+**How it works.** A dependency-free `Stop` hook (`hooks/prodtick-done.js`) writes a small JSON
+record per session into `%APPDATA%\Prodtick\inbox\`. The running app watches that folder, ingests
+each record as a Done task (keyed by session id), and deletes the file. Files dropped while the app
+is closed are drained on the next launch. All writes go through the main process, so nothing races
+the data store. Pure Q&A / read-only sessions are skipped (no file edits → no task).
+
+**Install the hook:**
+
+```sh
+npm run hook:install     # register the Stop hook in ~/.claude/settings.json (non-destructive)
+npm run hook:status      # check whether it is installed
+npm run hook:uninstall   # remove it
+```
+
+The installer merges only its own entry and backs up `settings.json` first, so it coexists with
+other Stop hooks (e.g. a Discord notifier). To wire it up by hand instead, add this group to
+`hooks.Stop` in `~/.claude/settings.json` (use absolute paths):
+
+```json
+{ "matcher": "", "hooks": [
+  { "type": "command", "command": "node",
+    "args": ["<repo>/hooks/prodtick-done.js", "--inbox", "%APPDATA%/Prodtick/inbox"] }
+] }
+```
+
+**AI titles (optional).** With `ANTHROPIC_API_KEY` set in the hook's environment, each task gets a
+concise one-line title via `claude-haiku-4-5`; without a key it falls back to Claude's last message
+(truncated). Override the model with `PRODTICK_SUMMARY_MODEL`.
+
+**Settings.** `settings.claudeCode` controls ingestion: `enabled` (master switch) and
+`projectAllowlist` (empty = accept all projects; otherwise only the listed project folder names).
 
 ## Keyboard shortcuts
 

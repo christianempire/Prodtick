@@ -72,6 +72,10 @@ export function mockData(): ProdtickData {
         hour: 12,
         minute: 0,
         notify: true
+      },
+      claudeCode: {
+        enabled: true,
+        projectAllowlist: []
       }
     }
   }

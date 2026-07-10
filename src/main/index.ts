@@ -28,6 +28,7 @@ import {
 } from './dataStore'
 import { destroyTray, ensureTray, refreshMenu } from './tray'
 import { generateNow, startScheduler, stopScheduler } from './scheduler'
+import { startInbox, stopInbox } from './inbox'
 import { IPC } from '@shared/ipc'
 import type { ProdtickData, Settings, TaskId, WeeklyReport, WeeklyReportSettings } from '@shared/types'
 
@@ -345,6 +346,9 @@ app.whenReady().then(() => {
   }
   startScheduler(schedulerHooks)
 
+  // Ingest finished Claude Code sessions dropped into the inbox folder.
+  startInbox({ onIngested: (d) => broadcastData(d) })
+
   ipcMain.handle(IPC.setWeeklyReportSettings, (_e, patch: Partial<WeeklyReportSettings>) => {
     const d = setWeeklyReportSettings(patch)
     broadcastData(d)
@@ -409,6 +413,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   ;(app as { isQuiting?: boolean }).isQuiting = true
   stopScheduler()
+  stopInbox()
   destroyTray()
 })
 

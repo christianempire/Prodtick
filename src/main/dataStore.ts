@@ -1,10 +1,12 @@
 import Store from 'electron-store'
 import { randomUUID } from 'node:crypto'
 import type {
+  ClaudeCodeSettings,
   ProdtickData,
   Settings,
   Task,
   TaskId,
+  TaskSource,
   WeeklyReport,
   WeeklyReportSettings
 } from '@shared/types'
@@ -17,12 +19,18 @@ const DEFAULT_WEEKLY_REPORT: WeeklyReportSettings = {
   notify: true
 }
 
+const DEFAULT_CLAUDE_CODE: ClaudeCodeSettings = {
+  enabled: true,
+  projectAllowlist: []
+}
+
 const DEFAULT_SETTINGS: Settings = {
   launchOnStartup: false,
   startMinimized: false,
   showOverlay: false,
   darkMode: true,
-  weeklyReport: { ...DEFAULT_WEEKLY_REPORT }
+  weeklyReport: { ...DEFAULT_WEEKLY_REPORT },
+  claudeCode: { ...DEFAULT_CLAUDE_CODE }
 }
 
 function makeDefault(): ProdtickData {
@@ -46,7 +54,8 @@ let cache: ProdtickData = (() => {
     settings: {
       ...DEFAULT_SETTINGS,
       ...(existing.settings ?? {}),
-      weeklyReport: { ...DEFAULT_WEEKLY_REPORT, ...(existing.settings?.weeklyReport ?? {}) }
+      weeklyReport: { ...DEFAULT_WEEKLY_REPORT, ...(existing.settings?.weeklyReport ?? {}) },
+      claudeCode: { ...DEFAULT_CLAUDE_CODE, ...(existing.settings?.claudeCode ?? {}) }
     }
   }
 })()
@@ -111,6 +120,59 @@ export function untickTask(id: TaskId): ProdtickData {
   }
   save()
   return cache
+}
+
+// Ingest a finished external session as a completed task, keyed by its source
+// session id. First sighting creates a new done task; later iterations of the
+// same session update the existing task's content in place. The task is re-homed
+// respectfully: if the user has archived or reopened (un-ticked) it, it stays
+// where they put it rather than being forced back into `done`.
+export function upsertExternalDone(input: {
+  source: TaskSource
+  html: string
+  completedAt: number
+}): { data: ProdtickData; created: boolean } {
+  const matches = (t: Task) =>
+    t.source?.kind === input.source.kind && t.source.sessionId === input.source.sessionId
+  const stamp = Math.floor(input.completedAt)
+
+  const inActive = cache.active.find(matches)
+  const inDone = cache.done.find(matches)
+  const inArchive = cache.archive.find(matches)
+  const existing = inActive ?? inDone ?? inArchive
+
+  if (!existing) {
+    const task: Task = {
+      id: randomUUID(),
+      html: input.html,
+      createdAt: Date.now(),
+      completedAt: stamp,
+      source: { ...input.source }
+    }
+    cache = { ...cache, done: [task, ...cache.done] }
+    save()
+    return { data: cache, created: true }
+  }
+
+  const updated: Task = {
+    ...existing,
+    html: input.html,
+    completedAt: stamp,
+    source: { ...input.source } // keep project fresh
+  }
+  let next: ProdtickData = {
+    ...cache,
+    active: cache.active.filter(t => !matches(t)),
+    done: cache.done.filter(t => !matches(t)),
+    archive: cache.archive.filter(t => !matches(t))
+  }
+  if (inArchive) next = { ...next, archive: [updated, ...next.archive] }
+  else if (inActive) next = { ...next, active: [updated, ...next.active] }
+  else next = { ...next, done: [updated, ...next.done] }
+
+  cache = next
+  save()
+  return { data: cache, created: false }
 }
 
 export function reorderActive(orderedIds: TaskId[]): ProdtickData {
