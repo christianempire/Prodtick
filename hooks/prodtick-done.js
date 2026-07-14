@@ -257,15 +257,6 @@ function buildDigest(scan) {
   return parts.join('\n\n');
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/\r?\n/g, '<br>');
-}
-
 // Optional AI title. Resolves to null on no key / any failure, so the caller
 // falls back to the raw last message. Uses a plain Messages API call.
 function summarize(text) {
@@ -374,10 +365,14 @@ async function main() {
   // segmentStart makes each post-gap burst its own task; turns within a segment
   // share it and so keep updating the same task.
   const segmentStart = Number.isFinite(scan.segmentStart) ? scan.segmentStart : 0;
+  // Write the title as raw plain text. Prodtick's inbox treats this field as
+  // untrusted and does the one authoritative HTML-escape on ingest; escaping
+  // here too would double-escape (e.g. `"` -> `&quot;` -> `&amp;quot;`, which
+  // renders as a literal `&quot;`).
   const record = {
     version: 1,
     source: { kind: 'claude-code', sessionId, project, segmentStart },
-    html: escapeHtml(title),
+    html: title,
     completedAt: Date.now()
   };
 

@@ -88,7 +88,9 @@ function scheduleDrain(hooks: InboxHooks): void {
 
 // Plain-text → inert HTML. The store renders task.html raw and its DOM-based
 // sanitizer can't run here in the main process, so escaping is mandatory. The
-// hook already escapes, but the file on disk is untrusted, so we redo it.
+// hook writes the title as raw plain text and the file on disk is untrusted, so
+// this is the single authoritative escape — do NOT also escape in the hook, or
+// the result double-escapes (`"` → `&quot;` → `&amp;quot;`).
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
