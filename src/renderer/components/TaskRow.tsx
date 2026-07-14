@@ -146,9 +146,14 @@ export default function TaskRow({ task, variant, sortable = false, overlay = fal
 function MetaTime({ label, ts, numColor }: { label: string; ts: number; numColor?: string }) {
   const d = compactDelta(ts)
   if (d === 'now') return <>{label} just now</>
+  // Relative deltas are "5m"/"3h"/"5d" and read as "created 5d ago". Older
+  // items fall back to an absolute date ("Jul 3"), which takes "on", not "ago".
+  const isRelative = /^\d+[mhd]$/.test(d)
   return (
     <>
-      {label} <span className="pt-meta-num" style={numColor ? { color: numColor } : undefined}>{d}</span> ago
+      {label} {isRelative ? '' : 'on '}
+      <span className="pt-meta-num" style={numColor ? { color: numColor } : undefined}>{d}</span>
+      {isRelative ? ' ago' : ''}
     </>
   )
 }
