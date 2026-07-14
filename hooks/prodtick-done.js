@@ -22,6 +22,9 @@ const https = require('https');
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
 const TAIL_BYTES = 512 * 1024;
+const HEAD_BYTES = 128 * 1024;
+const MAX_FULL_BYTES = 4 * 1024 * 1024; // read whole transcript up to this size
+const DIGEST_BUDGET = 6000; // chars of assistant text fed to the summarizer
 const MAX_TITLE = 2000;
 const SUMMARY_MODEL = process.env.PRODTICK_SUMMARY_MODEL || 'claude-haiku-4-5';
 
@@ -91,21 +94,27 @@ function readStdin() {
   });
 }
 
-// Read only the tail of a (potentially huge) JSONL transcript.
-function readTail(filePath) {
+// Read the transcript for scanning. Whole file when small enough; otherwise the
+// head (holds the original request) plus the tail (holds recent work + edits),
+// so a cumulative summary never loses how the session started. A partial line at
+// the head/tail seam just fails JSON.parse and is skipped.
+function readForScan(filePath) {
   const fd = fs.openSync(filePath, 'r');
   try {
     const { size } = fs.fstatSync(fd);
-    const start = Math.max(0, size - TAIL_BYTES);
-    const length = size - start;
-    const buf = Buffer.alloc(length);
-    fs.readSync(fd, buf, 0, length, start);
-    let text = buf.toString('utf8');
-    if (start > 0) {
-      const nl = text.indexOf('\n');
-      if (nl !== -1) text = text.slice(nl + 1);
+    if (size <= MAX_FULL_BYTES) {
+      const buf = Buffer.alloc(size);
+      fs.readSync(fd, buf, 0, size, 0);
+      return buf.toString('utf8');
     }
-    return text;
+    const head = Buffer.alloc(HEAD_BYTES);
+    fs.readSync(fd, head, 0, HEAD_BYTES, 0);
+    const tail = Buffer.alloc(TAIL_BYTES);
+    fs.readSync(fd, tail, 0, TAIL_BYTES, size - TAIL_BYTES);
+    let tailText = tail.toString('utf8');
+    const nl = tailText.indexOf('\n');
+    if (nl !== -1) tailText = tailText.slice(nl + 1);
+    return head.toString('utf8') + '\n' + tailText;
   } finally {
     fs.closeSync(fd);
   }
@@ -115,6 +124,13 @@ function isAssistant(obj) {
   if (!obj || typeof obj !== 'object') return false;
   if (obj.type === 'assistant') return true;
   if (obj.message && obj.message.role === 'assistant') return true;
+  return false;
+}
+
+function isUser(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (obj.type === 'user') return true;
+  if (obj.message && obj.message.role === 'user') return true;
   return false;
 }
 
@@ -136,17 +152,18 @@ function extractText(obj) {
   return parts.join('\n').trim();
 }
 
-// Scan the transcript tail. Returns { edited, lastMessage } where `edited` is
-// true if any assistant turn in the tail used a file-editing tool. Because Stop
-// fires each turn, the edit turn's own tail always contains its tool_use, so a
-// task is reliably created on the first edit turn.
+// Scan the whole session (top to bottom). Returns the original request
+// (`firstUser`), every assistant text turn (`assistantTexts`), the latest one
+// (`lastMessage`), and whether any turn edited files (`edited`). Scanning the
+// full session — not just the last turn — is what lets an iteration's summary
+// reflect the original task instead of replacing it.
 function scanTranscript(transcriptPath) {
-  const out = { edited: false, lastMessage: null };
+  const out = { edited: false, firstUser: null, assistantTexts: [], lastMessage: null };
   try {
     if (!transcriptPath || !fs.existsSync(transcriptPath)) return out;
-    const lines = readTail(transcriptPath).split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
+    const lines = readForScan(transcriptPath).split('\n');
+    for (const raw of lines) {
+      const line = raw.trim();
       if (!line) continue;
       let obj;
       try {
@@ -154,24 +171,52 @@ function scanTranscript(transcriptPath) {
       } catch {
         continue;
       }
+      if (isUser(obj)) {
+        if (!out.firstUser) {
+          const text = extractText(obj); // tool-result-only user turns yield '' and are skipped
+          if (text) out.firstUser = text;
+        }
+        continue;
+      }
       if (!isAssistant(obj)) continue;
-      if (!out.edited) {
-        for (const block of contentBlocks(obj)) {
-          if (block && block.type === 'tool_use' && EDIT_TOOLS.has(block.name)) {
-            out.edited = true;
-            break;
-          }
+      for (const block of contentBlocks(obj)) {
+        if (block && block.type === 'tool_use' && EDIT_TOOLS.has(block.name)) {
+          out.edited = true;
+          break;
         }
       }
-      if (!out.lastMessage) {
-        const text = extractText(obj);
-        if (text) out.lastMessage = text;
+      const text = extractText(obj);
+      if (text) {
+        out.assistantTexts.push(text);
+        out.lastMessage = text;
       }
     }
   } catch {
     /* best-effort */
   }
   return out;
+}
+
+// Keep the head and tail of a long string, dropping the middle — preserves both
+// how the session started and where it ended up within the token budget.
+function clip(s, max) {
+  if (s.length <= max) return s;
+  const half = Math.max(0, Math.floor(max / 2) - 2);
+  return s.slice(0, half) + '\n…\n' + s.slice(s.length - half);
+}
+
+// Compose the summarizer input from the original request plus everything the
+// assistant reported across the session, so the summary is cumulative.
+function buildDigest(scan) {
+  const parts = [];
+  if (scan.firstUser) parts.push('Original request:\n' + scan.firstUser.slice(0, 1500));
+  if (scan.assistantTexts.length) {
+    parts.push(
+      'What the assistant reported across the session (oldest to newest):\n' +
+        clip(scan.assistantTexts.join('\n---\n'), DIGEST_BUDGET)
+    );
+  }
+  return parts.join('\n\n');
 }
 
 function escapeHtml(s) {
@@ -191,11 +236,14 @@ function summarize(text) {
     if (!key || !text) return resolve(null);
     const payload = JSON.stringify({
       model: SUMMARY_MODEL,
-      max_tokens: 60,
+      max_tokens: 90,
       system:
-        'You turn a coding assistant transcript into ONE concise past-tense task line ' +
-        'describing what was accomplished, at most 16 words. No quotes, no markdown, no trailing period.',
-      messages: [{ role: 'user', content: 'Summarize what was done:\n\n' + text.slice(0, 6000) }]
+        'You summarize an entire coding session for a task tracker. Given the original request and ' +
+        'what the assistant did across one or more iterations, write ONE concise past-tense line naming ' +
+        'the overall task and what was accomplished. Anchor on the original goal and fold in later ' +
+        'iterations; do not describe only the most recent change. At most ~25 words. ' +
+        'No quotes, no markdown, no trailing period.',
+      messages: [{ role: 'user', content: text.slice(0, 8000) }]
     });
     let settled = false;
     const finish = (v) => {
@@ -274,11 +322,16 @@ async function main() {
     typeof data.last_assistant_message === 'string' && data.last_assistant_message.trim()
       ? data.last_assistant_message.trim()
       : null;
-  const body = fromPayload || scan.lastMessage || '';
-  if (!body) return;
+  if (fromPayload && !scan.lastMessage) scan.lastMessage = fromPayload;
 
-  const summarized = await summarize(body);
-  const title = (summarized || body).slice(0, MAX_TITLE);
+  // AI summarizes the whole session (original request + all iterations). Without
+  // a key, fall back to the original request so the first task is never lost;
+  // only if there is none do we use the latest message.
+  const digest = buildDigest(scan);
+  const fallback = scan.firstUser || scan.lastMessage || fromPayload || '';
+  const summarized = await summarize(digest || fallback);
+  const title = (summarized || fallback).slice(0, MAX_TITLE);
+  if (!title) return;
 
   const record = {
     version: 1,
