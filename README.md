@@ -81,9 +81,15 @@ of the same session update that same task in place rather than piling up duplica
 
 **How it works.** A dependency-free `Stop` hook (`hooks/prodtick-done.js`) writes a small JSON
 record per session into `%APPDATA%\Prodtick\inbox\`. The running app watches that folder, ingests
-each record as a Done task (keyed by session id), and deletes the file. Files dropped while the app
-is closed are drained on the next launch. All writes go through the main process, so nothing races
-the data store. Pure Q&A / read-only sessions are skipped (no file edits → no task).
+each record as a Done task (keyed by session id + segment), and deletes the file. Files dropped
+while the app is closed are drained on the next launch. All writes go through the main process, so
+nothing races the data store. Pure Q&A / read-only sessions are skipped (no file edits → no task).
+
+**One task per work session, split on long gaps.** Iterating on the same Claude Code session updates
+the same task, and the summary stays cumulative (original request + everything done since). But a gap
+of more than 6h between prompts starts a *new* task — so picking a session back up the next day logs
+as fresh work rather than mutating yesterday's entry, and its summary is scoped to the post-gap work.
+Override the threshold with `PRODTICK_SPLIT_HOURS`.
 
 **Install the hook:**
 

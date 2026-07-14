@@ -26,6 +26,9 @@ const HEAD_BYTES = 128 * 1024;
 const MAX_FULL_BYTES = 4 * 1024 * 1024; // read whole transcript up to this size
 const DIGEST_BUDGET = 6000; // chars of assistant text fed to the summarizer
 const MAX_TITLE = 2000;
+// A gap longer than this between turns of one session starts a new task.
+const SPLIT_GAP_HOURS = Number(process.env.PRODTICK_SPLIT_HOURS) || 6;
+const SPLIT_GAP_MS = SPLIT_GAP_HOURS * 60 * 60 * 1000;
 const SUMMARY_MODEL = process.env.PRODTICK_SUMMARY_MODEL || 'claude-haiku-4-5';
 
 function argValue(name) {
@@ -152,43 +155,78 @@ function extractText(obj) {
   return parts.join('\n').trim();
 }
 
-// Scan the whole session (top to bottom). Returns the original request
-// (`firstUser`), every assistant text turn (`assistantTexts`), the latest one
-// (`lastMessage`), and whether any turn edited files (`edited`). Scanning the
-// full session — not just the last turn — is what lets an iteration's summary
-// reflect the original task instead of replacing it.
-function scanTranscript(transcriptPath) {
-  const out = { edited: false, firstUser: null, assistantTexts: [], lastMessage: null };
-  try {
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) return out;
-    const lines = readForScan(transcriptPath).split('\n');
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (isUser(obj)) {
-        if (!out.firstUser) {
-          const text = extractText(obj); // tool-result-only user turns yield '' and are skipped
-          if (text) out.firstUser = text;
-        }
-        continue;
-      }
-      if (!isAssistant(obj)) continue;
+// Collect the user/assistant turns of a transcript in order, each with its
+// timestamp (ms), text, and whether it edited files.
+function collectEntries(transcriptPath) {
+  const entries = [];
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return entries;
+  const lines = readForScan(transcriptPath).split('\n');
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const user = isUser(obj);
+    const assistant = !user && isAssistant(obj);
+    if (!user && !assistant) continue;
+    const ts = obj.timestamp ? Date.parse(obj.timestamp) : NaN;
+    let hasEdit = false;
+    if (assistant) {
       for (const block of contentBlocks(obj)) {
         if (block && block.type === 'tool_use' && EDIT_TOOLS.has(block.name)) {
-          out.edited = true;
+          hasEdit = true;
           break;
         }
       }
-      const text = extractText(obj);
-      if (text) {
-        out.assistantTexts.push(text);
-        out.lastMessage = text;
+    }
+    entries.push({ role: user ? 'user' : 'assistant', ts, text: extractText(obj), hasEdit });
+  }
+  return entries;
+}
+
+// Split into the CURRENT segment only: within one Claude Code session, a gap of
+// more than SPLIT_GAP_MS between consecutive turns starts a fresh task, so
+// picking up a session after a long break logs as new work rather than mutating
+// the earlier task. `segmentStart` (first turn's timestamp) is the stable key
+// for the segment — deterministic from the append-only transcript.
+//
+// Returns { edited, firstUser, assistantTexts, lastMessage, segmentStart } for
+// the latest segment. Summarizing only this segment is what scopes the title to
+// the post-gap work while still preserving that segment's own original request.
+function scanTranscript(transcriptPath) {
+  const out = { edited: false, firstUser: null, assistantTexts: [], lastMessage: null, segmentStart: null };
+  try {
+    const entries = collectEntries(transcriptPath);
+    if (entries.length === 0) return out;
+
+    // Find where the current segment starts (after the last >6h gap). Entries
+    // missing a timestamp inherit the previous one so they never force a split.
+    let startIdx = 0;
+    let prevTs = NaN;
+    for (let i = 0; i < entries.length; i++) {
+      const ts = Number.isFinite(entries[i].ts) ? entries[i].ts : prevTs;
+      if (Number.isFinite(ts) && Number.isFinite(prevTs) && ts - prevTs > SPLIT_GAP_MS) {
+        startIdx = i;
+      }
+      entries[i].ts = ts;
+      prevTs = ts;
+    }
+
+    const seg = entries.slice(startIdx);
+    out.segmentStart = Number.isFinite(seg[0].ts) ? seg[0].ts : null;
+    for (const e of seg) {
+      if (e.role === 'user') {
+        if (!out.firstUser && e.text) out.firstUser = e.text;
+        continue;
+      }
+      if (e.hasEdit) out.edited = true;
+      if (e.text) {
+        out.assistantTexts.push(e.text);
+        out.lastMessage = e.text;
       }
     }
   } catch {
@@ -324,18 +362,21 @@ async function main() {
       : null;
   if (fromPayload && !scan.lastMessage) scan.lastMessage = fromPayload;
 
-  // AI summarizes the whole session (original request + all iterations). Without
-  // a key, fall back to the original request so the first task is never lost;
-  // only if there is none do we use the latest message.
+  // AI summarizes the current segment (its original request + its iterations).
+  // Without a key, fall back to the segment's original request so the first task
+  // is never lost; only if there is none do we use the latest message.
   const digest = buildDigest(scan);
   const fallback = scan.firstUser || scan.lastMessage || fromPayload || '';
   const summarized = await summarize(digest || fallback);
   const title = (summarized || fallback).slice(0, MAX_TITLE);
   if (!title) return;
 
+  // segmentStart makes each post-gap burst its own task; turns within a segment
+  // share it and so keep updating the same task.
+  const segmentStart = Number.isFinite(scan.segmentStart) ? scan.segmentStart : 0;
   const record = {
     version: 1,
-    source: { kind: 'claude-code', sessionId, project },
+    source: { kind: 'claude-code', sessionId, project, segmentStart },
     html: escapeHtml(title),
     completedAt: Date.now()
   };
@@ -343,8 +384,10 @@ async function main() {
   try {
     const dir = inboxDir();
     fs.mkdirSync(dir, { recursive: true });
-    const finalPath = path.join(dir, sessionId + '.json');
-    const tmpPath = path.join(dir, sessionId + '.' + process.pid + '.tmp');
+    // One file per (session, segment); each turn in the segment overwrites it.
+    const base = sessionId + '-' + segmentStart;
+    const finalPath = path.join(dir, base + '.json');
+    const tmpPath = path.join(dir, base + '.' + process.pid + '.tmp');
     fs.writeFileSync(tmpPath, JSON.stringify(record), 'utf8');
     fs.renameSync(tmpPath, finalPath); // atomic on same volume; overwrites prior turn
   } catch {

@@ -7,6 +7,10 @@ export interface TaskSource {
   kind: 'claude-code'
   sessionId: string
   project: string
+  // Start time (epoch ms) of the session segment this task belongs to. A gap of
+  // more than a few hours between turns of one session starts a new segment (and
+  // thus a new task), so this is part of the upsert identity, not just metadata.
+  segmentStart?: number
 }
 
 export interface Task {

@@ -125,8 +125,12 @@ function parseAndValidate(raw: string): InboxRecord | null {
     typeof rec.completedAt === 'number' && Number.isFinite(rec.completedAt)
       ? rec.completedAt
       : Date.now()
+  const source: TaskSource = { kind: 'claude-code', sessionId, project }
+  if (typeof src.segmentStart === 'number' && Number.isFinite(src.segmentStart)) {
+    source.segmentStart = src.segmentStart
+  }
   return {
-    source: { kind: 'claude-code', sessionId, project },
+    source,
     html: escapeHtml(rec.html).slice(0, MAX_HTML),
     completedAt
   }

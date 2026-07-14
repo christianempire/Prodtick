@@ -132,8 +132,12 @@ export function upsertExternalDone(input: {
   html: string
   completedAt: number
 }): { data: ProdtickData; created: boolean } {
+  // Identity is (session, segment): a later burst of the same session (after a
+  // long gap) carries a different segmentStart and so becomes its own task.
   const matches = (t: Task) =>
-    t.source?.kind === input.source.kind && t.source.sessionId === input.source.sessionId
+    t.source?.kind === input.source.kind &&
+    t.source.sessionId === input.source.sessionId &&
+    (t.source.segmentStart ?? null) === (input.source.segmentStart ?? null)
   const stamp = Math.floor(input.completedAt)
 
   const inActive = cache.active.find(matches)
