@@ -21,9 +21,9 @@ const https = require('https');
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
-const TAIL_BYTES = 512 * 1024;
-const HEAD_BYTES = 128 * 1024;
-const MAX_FULL_BYTES = 4 * 1024 * 1024; // read whole transcript up to this size
+// Generous, because a single tool_result line can be megabytes and would
+// otherwise push this turn's prompt out of the window.
+const TAIL_BYTES = 1024 * 1024;
 const DIGEST_BUDGET = 6000; // chars of assistant text fed to the summarizer
 const MAX_TITLE = 2000;
 // A gap longer than this between turns of one session starts a new task.
@@ -97,29 +97,58 @@ function readStdin() {
   });
 }
 
-// Read the transcript for scanning. Whole file when small enough; otherwise the
-// head (holds the original request) plus the tail (holds recent work + edits),
-// so a cumulative summary never loses how the session started. A partial line at
-// the head/tail seam just fails JSON.parse and is skipped.
-function readForScan(filePath) {
+// Read only the tail of a (potentially enormous — 100MB+) JSONL transcript.
+// NEVER stitch a head sample onto the tail: the seam reads as a huge time gap
+// and the sample slides forward as the file grows, which would make any segment
+// boundary derived from it unstable. Segment identity comes from the state file
+// instead; the tail is used only for best-effort recent context.
+function readTail(filePath) {
   const fd = fs.openSync(filePath, 'r');
   try {
     const { size } = fs.fstatSync(fd);
-    if (size <= MAX_FULL_BYTES) {
-      const buf = Buffer.alloc(size);
-      fs.readSync(fd, buf, 0, size, 0);
-      return buf.toString('utf8');
+    const start = Math.max(0, size - TAIL_BYTES);
+    const length = size - start;
+    const buf = Buffer.alloc(length);
+    fs.readSync(fd, buf, 0, length, start);
+    let text = buf.toString('utf8');
+    if (start > 0) {
+      const nl = text.indexOf('\n');
+      if (nl !== -1) text = text.slice(nl + 1); // drop partial first line
     }
-    const head = Buffer.alloc(HEAD_BYTES);
-    fs.readSync(fd, head, 0, HEAD_BYTES, 0);
-    const tail = Buffer.alloc(TAIL_BYTES);
-    fs.readSync(fd, tail, 0, TAIL_BYTES, size - TAIL_BYTES);
-    let tailText = tail.toString('utf8');
-    const nl = tailText.indexOf('\n');
-    if (nl !== -1) tailText = tailText.slice(nl + 1);
-    return head.toString('utf8') + '\n' + tailText;
+    return text;
   } finally {
     fs.closeSync(fd);
+  }
+}
+
+// --- per-session hook state -------------------------------------------------
+// Kept OUTSIDE the inbox (the app ingests and deletes every *.json in there).
+// Holds the current segment's identity and context so neither survives a
+// transcript re-scan: { segmentStart, lastTs, edited, firstUser, lastSummary }.
+function stateDir() {
+  return path.join(path.dirname(inboxDir()), 'hook-state');
+}
+
+function readState(sessionId) {
+  try {
+    const raw = fs.readFileSync(path.join(stateDir(), sessionId + '.json'), 'utf8');
+    const s = JSON.parse(raw);
+    return s && typeof s === 'object' ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeState(sessionId, state) {
+  try {
+    const dir = stateDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const finalPath = path.join(dir, sessionId + '.json');
+    const tmpPath = path.join(dir, sessionId + '.' + process.pid + '.tmp');
+    fs.writeFileSync(tmpPath, JSON.stringify(state), 'utf8');
+    fs.renameSync(tmpPath, finalPath);
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -160,7 +189,7 @@ function extractText(obj) {
 function collectEntries(transcriptPath) {
   const entries = [];
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return entries;
-  const lines = readForScan(transcriptPath).split('\n');
+  const lines = readTail(transcriptPath).split('\n');
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
@@ -188,46 +217,36 @@ function collectEntries(transcriptPath) {
   return entries;
 }
 
-// Split into the CURRENT segment only: within one Claude Code session, a gap of
-// more than SPLIT_GAP_MS between consecutive turns starts a fresh task, so
-// picking up a session after a long break logs as new work rather than mutating
-// the earlier task. `segmentStart` (first turn's timestamp) is the stable key
-// for the segment — deterministic from the append-only transcript.
-//
-// Returns { edited, firstUser, assistantTexts, lastMessage, segmentStart } for
-// the latest segment. Summarizing only this segment is what scopes the title to
-// the post-gap work while still preserving that segment's own original request.
-function scanTranscript(transcriptPath) {
-  const out = { edited: false, firstUser: null, assistantTexts: [], lastMessage: null, segmentStart: null };
+// Summarize the latest turn from the transcript tail: when this turn's prompt
+// arrived, when activity last happened, what the user asked, what the assistant
+// reported, and whether it edited files.
+function scanLatestTurn(transcriptPath) {
+  const out = { promptTs: NaN, nowTs: NaN, prompt: null, texts: [], edited: false };
   try {
     const entries = collectEntries(transcriptPath);
     if (entries.length === 0) return out;
 
-    // Find where the current segment starts (after the last >6h gap). Entries
-    // missing a timestamp inherit the previous one so they never force a split.
-    let startIdx = 0;
-    let prevTs = NaN;
-    for (let i = 0; i < entries.length; i++) {
-      const ts = Number.isFinite(entries[i].ts) ? entries[i].ts : prevTs;
-      if (Number.isFinite(ts) && Number.isFinite(prevTs) && ts - prevTs > SPLIT_GAP_MS) {
-        startIdx = i;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (Number.isFinite(entries[i].ts)) {
+        out.nowTs = entries[i].ts;
+        break;
       }
-      entries[i].ts = ts;
-      prevTs = ts;
     }
-
-    const seg = entries.slice(startIdx);
-    out.segmentStart = Number.isFinite(seg[0].ts) ? seg[0].ts : null;
-    for (const e of seg) {
-      if (e.role === 'user') {
-        if (!out.firstUser && e.text) out.firstUser = e.text;
-        continue;
+    // The turn starts at the last real user prompt (tool-result entries are also
+    // role 'user' but carry no text, so they never match).
+    let startIdx = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].role === 'user' && entries[i].text) {
+        startIdx = i;
+        out.prompt = entries[i].text;
+        out.promptTs = entries[i].ts;
+        break;
       }
+    }
+    for (const e of entries.slice(startIdx)) {
+      if (e.role !== 'assistant') continue;
       if (e.hasEdit) out.edited = true;
-      if (e.text) {
-        out.assistantTexts.push(e.text);
-        out.lastMessage = e.text;
-      }
+      if (e.text) out.texts.push(e.text);
     }
   } catch {
     /* best-effort */
@@ -243,16 +262,15 @@ function clip(s, max) {
   return s.slice(0, half) + '\n…\n' + s.slice(s.length - half);
 }
 
-// Compose the summarizer input from the original request plus everything the
-// assistant reported across the session, so the summary is cumulative.
-function buildDigest(scan) {
+// Compose the summarizer input. Carrying the segment's original request and the
+// previous summary forward in state keeps the title cumulative without ever
+// re-reading a huge transcript.
+function buildDigest({ firstUser, lastSummary, texts }) {
   const parts = [];
-  if (scan.firstUser) parts.push('Original request:\n' + scan.firstUser.slice(0, 1500));
-  if (scan.assistantTexts.length) {
-    parts.push(
-      'What the assistant reported across the session (oldest to newest):\n' +
-        clip(scan.assistantTexts.join('\n---\n'), DIGEST_BUDGET)
-    );
+  if (firstUser) parts.push('Original request that started this task:\n' + firstUser.slice(0, 1500));
+  if (lastSummary) parts.push('Summary of the work so far:\n' + lastSummary);
+  if (texts.length) {
+    parts.push('New work in the latest iteration:\n' + clip(texts.join('\n---\n'), DIGEST_BUDGET));
   }
   return parts.join('\n\n');
 }
@@ -344,27 +362,62 @@ async function main() {
   if (!sessionId || !SESSION_ID_RE.test(sessionId)) return;
   const project = data.cwd ? path.basename(data.cwd) : 'unknown';
 
-  const scan = scanTranscript(data.transcript_path);
-  if (!scan.edited) return; // skip pure Q&A / read-only sessions
-
+  const turn = scanLatestTurn(data.transcript_path);
   const fromPayload =
     typeof data.last_assistant_message === 'string' && data.last_assistant_message.trim()
       ? data.last_assistant_message.trim()
       : null;
-  if (fromPayload && !scan.lastMessage) scan.lastMessage = fromPayload;
+  if (fromPayload && turn.texts.length === 0) turn.texts.push(fromPayload);
 
-  // AI summarizes the current segment (its original request + its iterations).
-  // Without a key, fall back to the segment's original request so the first task
-  // is never lost; only if there is none do we use the latest message.
-  const digest = buildDigest(scan);
-  const fallback = scan.firstUser || scan.lastMessage || fromPayload || '';
+  // Everything must stay on ONE clock. A turn's prompt line can be pushed out of
+  // the tail by megabyte tool_results, so when it's missing fall back to the
+  // turn's END (still transcript time) rather than Date.now() — mixing wall-clock
+  // with transcript time compares different clocks and splits on every prompt.
+  const nowTs = Number.isFinite(turn.nowTs) ? turn.nowTs : Date.now();
+  const promptTs = Number.isFinite(turn.promptTs) ? turn.promptTs : nowTs;
+
+  // Continue the current segment when this prompt arrived within the gap window
+  // of the last activity; otherwise this prompt becomes the base of a NEW
+  // segment. The window is rolling — every prompt inside it restarts the
+  // countdown, so only a real idle gap splits the task.
+  const prev = readState(sessionId);
+  const continuing = prev && Number.isFinite(prev.lastTs) && promptTs - prev.lastTs <= SPLIT_GAP_MS;
+
+  const segmentStart =
+    continuing && Number.isFinite(prev.segmentStart) ? prev.segmentStart : promptTs;
+  const firstUser = (continuing && prev.firstUser) || turn.prompt || null;
+  // Sticky within a segment: once it has edited files, later turns keep updating
+  // the task even if a given turn only talked.
+  const edited = (continuing && prev.edited === true) || turn.edited;
+
+  const state = {
+    segmentStart,
+    lastTs: nowTs,
+    edited,
+    firstUser,
+    lastSummary: continuing ? prev.lastSummary || null : null
+  };
+
+  // Always persist state, even when not logging, so the rolling gap stays accurate.
+  if (!edited) {
+    writeState(sessionId, state);
+    return; // pure Q&A / read-only so far
+  }
+
+  const digest = buildDigest({ firstUser, lastSummary: state.lastSummary, texts: turn.texts });
+  const fallback = firstUser || turn.texts[turn.texts.length - 1] || fromPayload || '';
   const summarized = await summarize(digest || fallback);
   const title = (summarized || fallback).slice(0, MAX_TITLE);
-  if (!title) return;
+  if (!title) {
+    writeState(sessionId, state);
+    return;
+  }
 
-  // segmentStart makes each post-gap burst its own task; turns within a segment
-  // share it and so keep updating the same task.
-  const segmentStart = Number.isFinite(scan.segmentStart) ? scan.segmentStart : 0;
+  // Carry the summary forward so the next iteration builds on it cumulatively
+  // without re-reading the transcript.
+  if (summarized) state.lastSummary = summarized;
+  writeState(sessionId, state);
+
   // Write the title as raw plain text. Prodtick's inbox treats this field as
   // untrusted and does the one authoritative HTML-escape on ingest; escaping
   // here too would double-escape (e.g. `"` -> `&quot;` -> `&amp;quot;`, which
