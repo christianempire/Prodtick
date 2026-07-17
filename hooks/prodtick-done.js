@@ -217,13 +217,17 @@ function collectEntries(transcriptPath) {
   return entries;
 }
 
-// Summarize the latest turn from the transcript tail: when this turn's prompt
-// arrived, when activity last happened, what the user asked, what the assistant
-// reported, and whether it edited files.
-function scanLatestTurn(transcriptPath) {
-  const out = { promptTs: NaN, nowTs: NaN, prompt: null, texts: [], edited: false };
+// Read the transcript tail once and expose everything the decision needs:
+// the latest turn (its prompt, timestamps, assistant texts) plus the ordered
+// entries so the caller can also ask "did anything in THIS SEGMENT edit files?"
+// — not just the latest turn. That segment-wide check is what lets a session
+// still log when the hook starts tracking it after its editing turn (e.g. the
+// hook was updated mid-session), instead of being stuck at edited:false forever.
+function scanTail(transcriptPath) {
+  const out = { promptTs: NaN, nowTs: NaN, prompt: null, texts: [], entries: [] };
   try {
     const entries = collectEntries(transcriptPath);
+    out.entries = entries;
     if (entries.length === 0) return out;
 
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -244,14 +248,45 @@ function scanLatestTurn(transcriptPath) {
       }
     }
     for (const e of entries.slice(startIdx)) {
-      if (e.role !== 'assistant') continue;
-      if (e.hasEdit) out.edited = true;
-      if (e.text) out.texts.push(e.text);
+      if (e.role === 'assistant' && e.text) out.texts.push(e.text);
     }
   } catch {
     /* best-effort */
   }
   return out;
+}
+
+// Did any turn edit files at or after the segment start? Entries without a
+// timestamp count (best-effort — never suppress on missing data).
+function segmentEdited(entries, segmentStart) {
+  return entries.some(
+    (e) => e.hasEdit && (!Number.isFinite(e.ts) || !Number.isFinite(segmentStart) || e.ts >= segmentStart)
+  );
+}
+
+// Earliest user prompt at/after the segment start — the segment's own original
+// request, recovered from the transcript even on the hook's first run for it.
+function segmentFirstUser(entries, segmentStart) {
+  for (const e of entries) {
+    if (e.role !== 'user' || !e.text) continue;
+    if (!Number.isFinite(e.ts) || !Number.isFinite(segmentStart) || e.ts >= segmentStart) return e.text;
+  }
+  return null;
+}
+
+// First run for a session (no saved state): reconstruct where the current
+// segment began from the transcript tail by walking back over gaps <= the split
+// window. Used ONLY to bootstrap; once state exists it pins segmentStart, so
+// this never re-runs per turn (which is what made an earlier version unstable on
+// huge, tail-truncated transcripts).
+function bootstrapSegmentStart(entries, fallbackTs) {
+  const ts = entries.map((e) => e.ts).filter(Number.isFinite);
+  if (ts.length === 0) return fallbackTs;
+  let start = ts[0];
+  for (let i = 1; i < ts.length; i++) {
+    if (ts[i] - ts[i - 1] > SPLIT_GAP_MS) start = ts[i]; // last idle gap wins
+  }
+  return start;
 }
 
 // Keep the head and tail of a long string, dropping the middle — preserves both
@@ -362,7 +397,7 @@ async function main() {
   if (!sessionId || !SESSION_ID_RE.test(sessionId)) return;
   const project = data.cwd ? path.basename(data.cwd) : 'unknown';
 
-  const turn = scanLatestTurn(data.transcript_path);
+  const turn = scanTail(data.transcript_path);
   const fromPayload =
     typeof data.last_assistant_message === 'string' && data.last_assistant_message.trim()
       ? data.last_assistant_message.trim()
@@ -383,12 +418,23 @@ async function main() {
   const prev = readState(sessionId);
   const continuing = prev && Number.isFinite(prev.lastTs) && promptTs - prev.lastTs <= SPLIT_GAP_MS;
 
-  const segmentStart =
-    continuing && Number.isFinite(prev.segmentStart) ? prev.segmentStart : promptTs;
-  const firstUser = (continuing && prev.firstUser) || turn.prompt || null;
-  // Sticky within a segment: once it has edited files, later turns keep updating
-  // the task even if a given turn only talked.
-  const edited = (continuing && prev.edited === true) || turn.edited;
+  // segmentStart precedence: pinned by state while continuing; a real >6h gap
+  // from known state starts a new segment at this prompt; with NO state at all,
+  // reconstruct the current segment from the transcript so edits earlier in it
+  // still count on the hook's first run for this session.
+  const segmentStart = continuing
+    ? prev.segmentStart
+    : prev
+      ? promptTs
+      : bootstrapSegmentStart(turn.entries, promptTs);
+  // Prefer the segment's original request recovered from the transcript so the
+  // first run for a session doesn't lose how it started.
+  const firstUser =
+    (continuing && prev.firstUser) || segmentFirstUser(turn.entries, segmentStart) || turn.prompt || null;
+  // edited is sticky via state AND checked segment-wide from the transcript, so
+  // an editing turn earlier in this segment still counts even if the hook only
+  // started tracking the session now (or this particular turn only talked).
+  const edited = (continuing && prev.edited === true) || segmentEdited(turn.entries, segmentStart);
 
   const state = {
     segmentStart,
